@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+#
+# Dependencies: nvidia-smi, nvidia-settings, awk
+#
+# Problem: nvidia-smi reports the current fan speed. On my card, everything below 50%
+# target fan speed turns the fans off completely and reports 0 fan speed. Thus, the fan
+# speed can never be increased to a value above the threshold of 50 by increments smaller
+# than that.
+
+MIN_TEMP=62
+MAX_TEMP=69
+MIN_FAN_SPEED=50
+MAX_FAN_SPEED=100
+FAN_INCREMENT=5
+SLEEP_INTERVAL=2
+
+GPUS=$(nvidia-smi -L | awk '/^GPU [0-9]:/ { print substr($2, 0, length($2)-1) }')
+
+# The DISPLAY env var doesn't seem to work in the systemd unit sometimes.
+# We employ a hack that circumvents the need for nvidia-settings to read the
+# DISPLAY variable by specifying it manually with the --ctrl-display option.
+if [ -z $DISPLAY ]
+then
+    DISPLAY=":0"
+fi
+
+function clamp()
+{
+    local val=$1
+    local min=$2
+    local max=$3
+    echo $((val < min ? min : val > max ? max : val))
+}
+
+function get_gpu_temp()
+{
+    local gpu=$1  # Shall be a GPU ID
+    nvidia-smi --id $gpu --query-gpu temperature.gpu --format csv,noheader,nounits
+}
+
+function get_gpu_fan_speed()
+{
+    local gpu=$1  # Shall be a GPU ID
+    nvidia-smi --id $gpu --query-gpu fan.speed --format csv,noheader,nounits
+}
+
+function set_gpu_fan_speed()
+{
+    local gpu=$1           # Shall be a GPU ID
+    local target_speed=$2  # Shall be a percentage
+
+    # This crap doesn't allow me to query/modify fans of specific GPUs.
+    # That's why this script only works on systems with one GPU.
+    local fans=$(nvidia-settings --ctrl-display=$DISPLAY -q fans \
+                 | awk 'match($2, /\[fan:[0-9]+\]/) { print substr($2, RSTART, RLENGTH) }')
+    for fan in $fans
+    do
+        nvidia-settings --ctrl-display=$DISPLAY \
+                        -a "[gpu:$gpu]/GPUFanControlState=1" \
+                        -a "$fan/GPUTargetFanSpeed=$target_speed"
+    done
+}
+
+function process_gpu()
+{
+    local gpu=$1  # Shall be a GPU ID
+
+    local fan=$(get_gpu_fan_speed $gpu)
+    local temp=$(get_gpu_temp $gpu)
+    local new_fan=$fan
+
+    # Determine new fan speed based on current temperature
+    if [ $temp -gt $MAX_TEMP ]
+    then
+        new_fan=$((fan + FAN_INCREMENT))
+    elif [ $temp -lt $MIN_TEMP ]
+    then
+        new_fan=$((fan - FAN_INCREMENT))
+    fi
+
+    new_fan=$(clamp $new_fan $MIN_FAN_SPEED $MAX_FAN_SPEED)
+
+    # Set new fan speed
+    if [ $new_fan -ne $fan ]
+    then
+        set_gpu_fan_speed $gpu $new_fan
+    fi
+}
+
+# Main loop querying and updating fan speeds
+while true
+do
+    for gpu in $GPUS
+    do
+        process_gpu $gpu
+    done
+
+    sleep $SLEEP_INTERVAL &
+    wait
+done

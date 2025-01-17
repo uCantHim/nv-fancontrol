@@ -1,0 +1,11 @@
+[Unit]
+Description=Automatic fan speed control for NVIDIA GPUs
+After=local-fs.target graphical.target
+
+[Service]
+Type=simple
+PIDFile=/run/nv-fancontrol.pid
+ExecStart=/bin/nv-fancontrol
+
+[Install]
+WantedBy=multi-user.target
